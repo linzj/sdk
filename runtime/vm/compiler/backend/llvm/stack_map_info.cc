@@ -22,7 +22,8 @@ CallSiteInfo::CallSiteInfo()
       parameter_bits_(0),
       valid_bits_(0),
       return_on_stack_pos_(-1),
-      is_tailcall_(false) {}
+      is_tailcall_(false),
+      needs_metadata_(true) {}
 
 void CallSiteInfo::MarkParameterBit(int which, bool set) {
   EMASSERT(which < 64);

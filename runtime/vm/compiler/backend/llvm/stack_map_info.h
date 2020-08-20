@@ -73,6 +73,7 @@ class CallSiteInfo final : public StackMapInfo {
   V(const Code*, fpu_code)                                                     \
   V(CodeEntryKind, entry_kind)                                                 \
   V(bool, is_tailcall)                                                         \
+  V(bool, needs_metadata)                                                      \
   V(int, return_on_stack_pos)                                                  \
   V(int64_t, parameter_bits)                                                   \
   V(int, valid_bits)                                                           \
@@ -135,6 +136,7 @@ class CallSiteInfo final : public StackMapInfo {
   int valid_bits_;
   int return_on_stack_pos_;
   bool is_tailcall_;
+  bool needs_metadata_;
 };
 
 #undef DEFINE_ACCESSOR

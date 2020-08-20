@@ -1576,6 +1576,7 @@ void AnonImpl::StoreIntoObject(Instruction* instr,
       LValue entry = nullptr;
       const auto& stub = Code::ZoneHandle(object_store()->write_barrier_stub());
       std::unique_ptr<CallSiteInfo> callsite_info(new CallSiteInfo);
+      callsite_info->set_needs_metadata(false);
       if (!stub.InVMIsolateHeap()) {
         callsite_info->set_type(CallSiteInfo::CallTargetType::kStubRelative);
         callsite_info->set_code(&stub);
@@ -1647,6 +1648,7 @@ void AnonImpl::StoreIntoArray(Instruction* instr,
     resolver.BuildLeft([&]() {
       // should emit
       std::unique_ptr<CallSiteInfo> callsite_info(new CallSiteInfo);
+      callsite_info->set_needs_metadata(false);
       LValue entry = nullptr;
       const auto& stub =
           Code::ZoneHandle(object_store()->array_write_barrier_stub());

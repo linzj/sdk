@@ -17,6 +17,23 @@
 namespace dart {
 DECLARE_FLAG(bool, source_lines);
 namespace dart_llvm {
+static inline uint32_t DART_USED Extract32(uint32_t value,
+                                           int start,
+                                           int length) {
+  assert(start >= 0 && length > 0 && length <= 32 - start);
+  return (value >> start) & (~0U >> (32 - length));
+}
+
+static inline int32_t DART_USED Sextract32(uint32_t value,
+                                           int start,
+                                           int length) {
+  assert(start >= 0 && length > 0 && length <= 32 - start);
+  /* Note that this implementation relies on right shift of signed
+     * integers being an arithmetic shift.
+     */
+  return ((int32_t)(value << (32 - length - start))) >> (32 - length);
+}
+
 #if defined(TARGET_ARCH_ARM)
 #include "vm/compiler/backend/llvm/llvm_code_assembler_arm.cc"
 #elif defined(TARGET_ARCH_ARM64)
@@ -283,6 +300,7 @@ std::function<void()> CodeAssembler::WrapAction(T f) {
 
 void CodeAssembler::AddMetaData(const CallSiteInfo* call_site_info,
                                 const StackMaps::Record& r) {
+  if (UNLIKELY(!call_site_info->needs_metadata())) return;
   intptr_t try_index = CollectExceptionInfo(call_site_info);
   compiler().AddDescriptor(call_site_info->kind(), assembler().CodeSize(),
                            call_site_info->deopt_id(),
@@ -294,65 +312,6 @@ void CodeAssembler::AddMetaData(const CallSiteInfo* call_site_info,
   }
   RecordSafePoint(call_site_info, r);
 }
-
-static inline uint32_t DART_USED Extract32(uint32_t value,
-                                           int start,
-                                           int length) {
-  assert(start >= 0 && length > 0 && length <= 32 - start);
-  return (value >> start) & (~0U >> (32 - length));
-}
-
-static inline int32_t DART_USED Sextract32(uint32_t value,
-                                           int start,
-                                           int length) {
-  assert(start >= 0 && length > 0 && length <= 32 - start);
-  /* Note that this implementation relies on right shift of signed
-     * integers being an arithmetic shift.
-     */
-  return ((int32_t)(value << (32 - length - start))) >> (32 - length);
-}
-
-#if defined(TARGET_ARCH_ARM)
-static int BranchOffset(const void* code) {
-  uint32_t insn = *reinterpret_cast<const uint32_t*>(code);
-  unsigned op1 = (insn >> 24) & 0xf;
-  switch (op1) {
-    case 0xa:
-    case 0xb: {
-      int32_t offset;
-
-      /* branch (and link) */
-      if (insn & (1 << 24)) {
-        break;
-      }
-      offset = Sextract32(insn << 2, 0, 26);
-      offset += 8;
-      return offset;
-    }
-    default:
-      break;
-  }
-  return -1;
-}
-#elif defined(TARGET_ARCH_ARM64)
-static int BranchOffset(const void* code) {
-  uint32_t insn = *reinterpret_cast<const uint32_t*>(code);
-
-  switch (Extract32(insn, 25, 7)) {
-    case 0x0a:
-    case 0x0b:
-    case 0x4a:
-    case 0x4b: {
-      return Sextract32(insn, 0, 26) * 4;
-    }
-    default:
-      break;
-  }
-  return -1;
-}
-#else
-#error unsupport arch
-#endif
 
 intptr_t CodeAssembler::CollectExceptionInfo(
     const CallSiteInfo* call_site_info) {

@@ -198,3 +198,25 @@ void CodeAssembler::EmitCP() {
   if (!arch_impl().will_emit_cp_) return;
   arch_impl().constant_pool_resolver_.EmitCP(assembler());
 }
+
+static int BranchOffset(const void* code) {
+  uint32_t insn = *reinterpret_cast<const uint32_t*>(code);
+  unsigned op1 = (insn >> 24) & 0xf;
+  switch (op1) {
+    case 0xa:
+    case 0xb: {
+      int32_t offset;
+
+      /* branch (and link) */
+      if (insn & (1 << 24)) {
+        break;
+      }
+      offset = Sextract32(insn << 2, 0, 26);
+      offset += 8;
+      return offset;
+    }
+    default:
+      break;
+  }
+  return -1;
+}
