@@ -168,15 +168,15 @@ class AnonImpl {
       RawPcDescriptors::Kind kind,
       size_t stack_argument_count,
       const std::vector<std::pair<Register, LValue>>& gp_parameters) {
-    return GenerateCall(instr, token_pos, deopt_id, false, stub, nullptr, kind,
-                        stack_argument_count, gp_parameters);
+    return GenerateCall(instr, token_pos, deopt_id, nullptr, stub, nullptr,
+                        kind, stack_argument_count, gp_parameters);
   }
 
   LValue GenerateCall(
       Instruction*,
       TokenPosition token_pos,
       intptr_t deopt_id,
-      bool is_shared_stub_call,
+      const char* csr,
       const Code& stub,
       const Code* fpu_stub,
       RawPcDescriptors::Kind kind,
@@ -317,6 +317,10 @@ class AnonImpl {
     return flow_graph()->isolate()->object_store();
   }
 
+  // CSR
+  const char* GetSharedStubCSR();
+  const char* GetCCallCSR();
+  const char* GetBoxInt64SharedStubCSR();
   // classes
   const Class& mint_class() {
     return Class::ZoneHandle(object_store()->mint_class());
@@ -457,7 +461,9 @@ class CallResolver : public ContinuationResolver {
   void AddStackParameter(LValue);
   LValue GetStackParameter(size_t i);
   LValue BuildCall();
-  void set_shared_stub_call() { is_shared_stub_call_ = true; }
+  void set_callee_save_register(const char* callee_save_registers) {
+    callee_save_registers_ = callee_save_registers;
+  }
 
  private:
   void GenerateStatePointFunction();
@@ -467,7 +473,7 @@ class CallResolver : public ContinuationResolver {
   void EmitRelocatesIfNeeded();
   void EmitPatchPoint();
   void EmitExceptionVars();
-  void EmitIfSharedStubCall();
+  void EmitCSR();
   bool need_invoke() { return tail_call_ == false && catch_block_ != nullptr; }
 
   CallResolverParameter& call_resolver_parameter_;
@@ -486,6 +492,7 @@ class CallResolver : public ContinuationResolver {
   LBasicBlock continuation_block_ = nullptr;
   CatchBlockEntryInstr* catch_block_ = nullptr;
   BitVector* call_live_out_ = nullptr;
+  const char* callee_save_registers_ = nullptr;
   std::unordered_map<int /* ssa_index */, int /* where */> gc_desc_map_;
   std::unordered_map<int /* var index */, int /* where */>
       exception_gc_desc_map_;
@@ -494,7 +501,6 @@ class CallResolver : public ContinuationResolver {
   int patchid_ = 0;
   int pp_value_at_state_point_ = 0;
   bool tail_call_ = false;
-  bool is_shared_stub_call_ = false;
   DISALLOW_COPY_AND_ASSIGN(CallResolver);
 };
 
@@ -1003,7 +1009,7 @@ LValue AnonImpl::GenerateCall(
     Instruction* instr,
     TokenPosition token_pos,
     intptr_t deopt_id,
-    bool is_shared_stub_call,
+    const char* csr,
     const Code& stub,
     const Code* fpu_stub,
     RawPcDescriptors::Kind kind,
@@ -1026,8 +1032,8 @@ LValue AnonImpl::GenerateCall(
       pushed_arguments_.pop_back();
       resolver.AddStackParameter(argument);
     }
-    EMASSERT(fpu_stub == nullptr || is_shared_stub_call);
-    if (is_shared_stub_call) resolver.set_shared_stub_call();
+    EMASSERT(fpu_stub == nullptr || csr != nullptr);
+    resolver.set_callee_save_register(csr);
     for (auto p : gp_parameters) {
       resolver.SetGParameter(Output::RegisterToParameterLoc(p.first), p.second);
     }
@@ -1598,7 +1604,7 @@ void AnonImpl::StoreIntoObject(Instruction* instr,
           Output::RegisterToParameterLoc(kWriteBarrierObjectReg), object);
       call_resolver.SetGParameter(
           Output::RegisterToParameterLoc(kWriteBarrierValueReg), value);
-      call_resolver.set_shared_stub_call();
+      call_resolver.set_callee_save_register(GetSharedStubCSR());
       call_resolver.BuildCall();
       return value;
     });
@@ -1674,7 +1680,7 @@ void AnonImpl::StoreIntoArray(Instruction* instr,
           Output::RegisterToParameterLoc(kWriteBarrierValueReg), value);
       call_resolver.SetGParameter(
           Output::RegisterToParameterLoc(kWriteBarrierSlotReg), gep);
-      call_resolver.set_shared_stub_call();
+      call_resolver.set_callee_save_register(GetSharedStubCSR());
       call_resolver.BuildCall();
 
       return value;
@@ -2040,7 +2046,7 @@ LValue CallResolver::BuildCall() {
   }
   EmitRelocatesIfNeeded();
   EmitPatchPoint();
-  EmitIfSharedStubCall();
+  EmitCSR();
   return call_value_;
 }
 
@@ -2255,12 +2261,9 @@ void CallResolver::EmitExceptionVars() {
   }
 }
 
-void CallResolver::EmitIfSharedStubCall() {
-  if (LIKELY(!is_shared_stub_call_)) return;
-  static const char kDartSharedStubCall[] = "dart-shared-stub-call";
-  LLVMAttributeRef attr = output().createStringAttr(
-      kDartSharedStubCall, sizeof(kDartSharedStubCall) - 1, nullptr, 0);
-  LLVMAddCallSiteAttribute(statepoint_value_, ~0U, attr);
+void CallResolver::EmitCSR() {
+  if (LIKELY(!callee_save_registers_)) return;
+  output().assignCSRAttr(statepoint_value_, callee_save_registers_);
 }
 
 BoxAllocationSlowPath::BoxAllocationSlowPath(Instruction* instruction,
@@ -4090,6 +4093,8 @@ void IRTranslator::VisitBinarySmiOp(BinarySmiOpInstr* instr) {
   } else {
     LValue left = impl().SmiUntag(impl().GetLLVMValue(instr->left()));
     LValue right = impl().SmiUntag(impl().GetLLVMValue(instr->right()));
+    output().assignEvenNumberAttr(left);
+    output().assignEvenNumberAttr(right);
     switch (instr->op_kind()) {
       case Token::kSHL:
         value = output().buildShl(left, right);
@@ -4360,8 +4365,9 @@ void IRTranslator::VisitCheckStackOverflow(CheckStackOverflowInstr* instr) {
     const auto& fpu_stub = Code::ZoneHandle(
         impl().zone(),
         impl().object_store()->stack_overflow_stub_with_fpu_regs_stub());
-    impl().GenerateCall(instr, instr->token_pos(), DeoptId::kNone, true, stub,
-                        &fpu_stub, RawPcDescriptors::kOther, 0, {});
+    impl().GenerateCall(instr, instr->token_pos(), DeoptId::kNone,
+                        impl().GetSharedStubCSR(), stub, &fpu_stub,
+                        RawPcDescriptors::kOther, 0, {});
   } else {
     std::unique_ptr<CallSiteInfo> callsite_info(new CallSiteInfo);
     callsite_info->set_type(CallSiteInfo::CallTargetType::kThreadOffset);
@@ -4375,7 +4381,7 @@ void IRTranslator::VisitCheckStackOverflow(CheckStackOverflowInstr* instr) {
 
     CallResolver::CallResolverParameter param(instr, std::move(callsite_info));
     CallResolver call_resolver(impl(), -1, param);
-    call_resolver.set_shared_stub_call();
+    call_resolver.set_callee_save_register(impl().GetSharedStubCSR());
     call_resolver.BuildCall();
   }
   resolver.GotoMerge();
@@ -4802,9 +4808,10 @@ void IRTranslator::VisitBoxInt64(BoxInt64Instr* instr) {
 
     resolver.Bind(slow_path);
     if (BoxInt64Instr::SlowPathSharingSupported(true) &&
+        FLAG_use_bare_instructions &&
         !impl()
              .object_store()
-             ->allocate_mint_without_fpu_regs_stub()
+             ->allocate_mint_with_fpu_regs_stub()
              ->InVMIsolateHeap()) {
       const auto& stub = Code::ZoneHandle(
           impl().zone(),
@@ -4812,9 +4819,9 @@ void IRTranslator::VisitBoxInt64(BoxInt64Instr* instr) {
       const auto& fpu_stub = Code::ZoneHandle(
           impl().zone(),
           impl().object_store()->allocate_mint_with_fpu_regs_stub());
-      result =
-          impl().GenerateCall(instr, instr->token_pos(), DeoptId::kNone, true,
-                              stub, &fpu_stub, RawPcDescriptors::kOther, 0, {});
+      result = impl().GenerateCall(instr, instr->token_pos(), DeoptId::kNone,
+                                   impl().GetBoxInt64SharedStubCSR(), stub,
+                                   &fpu_stub, RawPcDescriptors::kOther, 0, {});
     } else {
       BoxAllocationSlowPath allocate(instr, impl().mint_class(), impl());
       result = allocate.Allocate();
@@ -5035,6 +5042,8 @@ void IRTranslator::VisitInvokeMathCFunction(InvokeMathCFunctionInstr* instr) {
   LLVMAttributeRef attr =
       output().createStringAttr(kDartCCall, sizeof(kDartCCall) - 1, nullptr, 0);
   LLVMAddCallSiteAttribute(statepoint_value, ~0U, attr);
+  if (impl().GetCCallCSR())
+    output().assignCSRAttr(statepoint_value, impl().GetCCallCSR());
 
   LValue intrinsic = output().getGCResultFunction(return_type);
   LValue call_value = output().buildCall(intrinsic, statepoint_value);

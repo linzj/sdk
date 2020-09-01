@@ -232,6 +232,10 @@ LValue Output::constTagged(uintptr_t magic) {
   return buildCast(LLVMIntToPtr, intptr, tagged_type());
 }
 
+LValue Output::constString(const char* s) {
+  return LLVMConstStringInContext(state_.context_, s, strlen(s), false);
+}
+
 LValue Output::buildStructGEP(LValue structVal, unsigned field) {
   return setInstrDebugLoc(
       dart_llvm::buildStructGEP(builder_, structVal, field));
@@ -263,9 +267,7 @@ LValue Output::buildLoadUnaligned(LValue toLoad) {
 
 LValue Output::buildLoadSmi(LValue toLoad) {
   LValue load = dart_llvm::buildLoad(builder_, toLoad);
-  LValue mdnode = LLVMMDNodeInContext(state_.context_, nullptr, 0);
-  constexpr static const unsigned kMD_even_number = 30;
-  LLVMSetMetadata(load, kMD_even_number, mdnode);
+  assignEvenNumberAttr(load);
   return setInstrDebugLoc(load);
 }
 
@@ -578,6 +580,19 @@ LValue Output::setInstrDebugLoc(LValue v) {
   if (ValueKindIsFind(v)) LLVMSetInstDebugLocation(builder_, v);
 #endif
   return v;
+}
+
+void Output::assignEvenNumberAttr(LValue load) {
+  constexpr static const unsigned kMD_even_number = 30;
+  LValue mdnode = LLVMMDNodeInContext(state_.context_, nullptr, 0);
+  LLVMSetMetadata(load, kMD_even_number, mdnode);
+}
+
+void Output::assignCSRAttr(LValue call, const char* csr) {
+  static const char kCustomRegmask[] = "custom-regmask";
+  LLVMAttributeRef attr = createStringAttr(
+      kCustomRegmask, sizeof(kCustomRegmask) - 1, csr, strlen(csr));
+  LLVMAddCallSiteAttribute(call, ~0U, attr);
 }
 
 void Output::finalizeDebugInfo() {

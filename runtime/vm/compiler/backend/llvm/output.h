@@ -39,6 +39,7 @@ class Output {
   LValue constInt64(long long);
   LValue constDouble(double);
   LValue constTagged(uintptr_t);
+  LValue constString(const char*);
   LValue buildStructGEP(LValue structVal, unsigned field);
   LValue buildGEPWithByteOffset(LValue base, LValue offset, LType dstType);
   LValue buildGEPWithByteOffset(LValue base, int offset, LType dstType);
@@ -122,6 +123,8 @@ class Output {
                                     unsigned key_len,
                                     const char* value,
                                     unsigned value_len);
+  void assignEvenNumberAttr(LValue load);
+  void assignCSRAttr(LValue call, const char* csr);
   void setDebugInfo(intptr_t linenum, const char* source_file_name);
   void finalize();
   LValue addFunction(const char* name, LType type);
