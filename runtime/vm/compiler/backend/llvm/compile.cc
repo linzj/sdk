@@ -126,17 +126,7 @@ static uint8_t* mmAllocateDataSection(void* opaqueState,
 #endif
   static const char kDwarfLine[] = ".debug_line";
   if (!strcmp(sectionName, SECTION_NAME("llvm_stackmaps"))) {
-    // Only store the stack maps section, when there is a non-tail call.
-    bool only_tailcalls = true;
-    for (auto& p : state.stack_map_info_map_) {
-      auto& stack_map_info = p.second;
-      if (stack_map_info->GetType() == StackMapInfoType::kCallInfo &&
-          !static_cast<CallSiteInfo*>(stack_map_info.get())->is_tailcall()) {
-        only_tailcalls = false;
-        break;
-      }
-    }
-    if (!only_tailcalls) state.stackMapsSection_ = bb;
+    state.stackMapsSection_ = bb;
   } else if (!memcmp(sectionName, kExceptionTablePrefix,
                      sizeof(kExceptionTablePrefix) - 1)) {
     state.exception_table_ = bb;
