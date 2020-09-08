@@ -126,6 +126,7 @@ class AnonImpl {
  public:
   AnonImpl() = default;
   ~AnonImpl() = default;
+
   LBasicBlock GetNativeBB(BlockEntryInstr* bb);
   LBasicBlock EnsureNativeBB(BlockEntryInstr* bb);
   IRTranslatorBlockImpl* GetTranslatorBlockImpl(BlockEntryInstr* bb);
@@ -345,6 +346,8 @@ class AnonImpl {
   Zone* zone() { return flow_graph_->zone(); }
   void set_exception_occured() { exception_occured_ = true; }
 
+  void CalculateBlockProbability();
+
   BlockEntryInstr* current_bb_;
   IRTranslatorBlockImpl* current_bb_impl_;
   FlowGraph* flow_graph_;
@@ -555,6 +558,17 @@ class ReturnRepresentationDeducer : public FlowGraphVisitor {
   void VisitReturn(ReturnInstr*) override;
   Representation rep_;
   DISALLOW_COPY_AND_ASSIGN(ReturnRepresentationDeducer);
+};
+
+class BlockProbabilityDeducer {
+ public:
+  explicit BlockProbabilityDeducer(AnonImpl& impl);
+  ~BlockProbabilityDeducer() = default;
+  void Deduce();
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(BlockProbabilityDeducer);
+  AnonImpl& impl_;
 };
 
 class Label {
@@ -1802,6 +1816,11 @@ LBasicBlock AnonImpl::GetCurrentBlockContinuation() {
   return current_bb_impl()->continuation;
 }
 
+void AnonImpl::CalculateBlockProbability() {
+  BlockProbabilityDeducer deducer(*this);
+  deducer.Deduce();
+}
+
 ModifiedValuesMergeHelper::ModifiedValuesMergeHelper(AnonImpl& impl)
     : impl_(impl) {
   values_modified_ = impl.liveness().NewLiveBitVector();
@@ -2359,6 +2378,54 @@ Representation ReturnRepresentationDeducer::Deduce() {
   return rep_;
 }
 
+BlockProbabilityDeducer::BlockProbabilityDeducer(AnonImpl& impl)
+    : impl_(impl) {}
+
+void BlockProbabilityDeducer::Deduce() {
+  FlowGraph* flow_graph = impl_.flow_graph();
+  const GrowableArray<BlockEntryInstr*>& postorder = flow_graph->postorder();
+
+  ZoneGrowableArray<BlockEntryInstr*> work_list(impl_.zone(), 8);
+
+  for (intptr_t i = 0, block_count = postorder.length(); i < block_count; i++) {
+    BlockEntryInstr* block = postorder[i];
+    auto last = block->last_instruction();
+    if (last->SuccessorCount() != 0) continue;
+    if (last->IsThrow() || last->IsReThrow() || last->IsTailCall()) {
+      work_list.Add(block);
+    }
+  }
+
+  while (!work_list.is_empty()) {
+    BlockEntryInstr* block = work_list.RemoveLast();
+    // Get the predecessor into the work_list.
+    for (intptr_t i = 0, predecessor_count = block->PredecessorCount();
+         i < predecessor_count; ++i) {
+      BlockEntryInstr* predecessor = block->PredecessorAt(i);
+      if (predecessor->IsGraphEntry())
+        continue;
+      auto last = predecessor->last_instruction();
+      if (last->SuccessorCount() == 1) {
+        work_list.Add(predecessor);
+        continue;
+      }
+      EMASSERT(last->SuccessorCount() == 2);
+      BranchInstr* branch_instr = last->AsBranch();
+      EMASSERT(!!branch_instr);
+      TargetEntryInstr* true_successor = branch_instr->true_successor();
+      TargetEntryInstr* false_successor = branch_instr->false_successor();
+      if (true_successor == block) {
+        true_successor->set_edge_weight(0.0);
+        false_successor->set_edge_weight(1.0);
+      } else {
+        EMASSERT(false_successor == block);
+        true_successor->set_edge_weight(1.0);
+        false_successor->set_edge_weight(0.0);
+      }
+    }
+  }
+}
+
 static LLVMIntPredicate TokenKindToSmiCondition(Token::Kind kind) {
   switch (kind) {
     case Token::kEQ:
@@ -2743,6 +2810,7 @@ void IRTranslator::Translate() {
 #if 1
   if (!impl().output_) return;
   if (!impl().liveness().Analyze()) return;
+  impl().CalculateBlockProbability();
   VisitBlocks();
   if (impl().exception_occured_) return;
   impl().End();
@@ -3004,6 +3072,13 @@ void IRTranslator::VisitBranch(BranchInstr* instr) {
   instr->comparison()->Accept(&resolver);
   LValue cmp_val = resolver.result();
   cmp_val = impl().EnsureBoolean(cmp_val);
+  double true_weight = true_successor->edge_weight();
+  double false_weight = false_successor->edge_weight();
+  if (true_weight > false_weight) {
+    cmp_val = impl().ExpectTrue(cmp_val);
+  } else if (true_weight < false_weight) {
+    cmp_val = impl().ExpectFalse(cmp_val);
+  }
   output().buildCondBr(cmp_val, impl().GetNativeBB(true_successor),
                        impl().GetNativeBB(false_successor));
   impl().EndCurrentBlock();
