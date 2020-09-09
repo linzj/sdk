@@ -389,7 +389,8 @@ LValue Output::buildRetVoid(void) {
 }
 
 void Output::buildReturnForTailCall() {
-  buildUnreachable();
+  buildRet(LLVMGetUndef(
+      LLVMGetReturnType(LLVMGetElementType(typeOf(state_.function_)))));
 }
 
 void Output::buildRetUndef() {
