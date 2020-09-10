@@ -4504,6 +4504,46 @@ void IRTranslator::VisitInstantiateTypeArguments(
     LValue and_val = output().buildAnd(cmp_1, cmp_2);
     resolver.GotoMergeWithValueIf(and_val, null_object);
   }
+  // inline CanShareInstantiator.
+  bool with_runtime_check;
+  const Code* stub = &instr->GetStub();
+  if (instr->type_arguments().CanShareInstantiatorTypeArguments(
+          instr->instantiator_class(), &with_runtime_check)) {
+    LValue uninstantiated_ta = impl().LoadObject(instr->type_arguments());
+    LValue nullability_uninstantiated_ta = impl().LoadFieldFromOffset(
+        uninstantiated_ta,
+        compiler::target::TypeArguments::nullability_offset(),
+        output().repo().refPtr);
+    LValue nullability_instantiator_ta = impl().LoadFieldFromOffset(
+        instantiator_type_args,
+        compiler::target::TypeArguments::nullability_offset(),
+        output().repo().refPtr);
+    LValue and_value = output().buildAnd(nullability_uninstantiated_ta,
+                                         nullability_instantiator_ta);
+    LValue cmp_val =
+        output().buildICmp(LLVMIntEQ, and_value, nullability_uninstantiated_ta);
+    resolver.GotoMergeWithValueIf(impl().ExpectTrue(cmp_val),
+                                  instantiator_type_args);
+    stub = &StubCode::InstantiateTypeArguments();
+  } else if (instr->type_arguments().CanShareFunctionTypeArguments(
+                 instr->function(), &with_runtime_check)) {
+    LValue uninstantiated_ta = impl().LoadObject(instr->type_arguments());
+    LValue nullability_uninstantiated_ta = impl().LoadFieldFromOffset(
+        uninstantiated_ta,
+        compiler::target::TypeArguments::nullability_offset(),
+        output().repo().refPtr);
+    LValue nullability_function_ta = impl().LoadFieldFromOffset(
+        function_type_args,
+        compiler::target::TypeArguments::nullability_offset(),
+        output().repo().refPtr);
+    LValue and_value = output().buildAnd(nullability_uninstantiated_ta,
+                                         nullability_function_ta);
+    LValue cmp_val =
+        output().buildICmp(LLVMIntEQ, and_value, nullability_uninstantiated_ta);
+    resolver.GotoMergeWithValueIf(impl().ExpectTrue(cmp_val),
+                                  function_type_args);
+    stub = &StubCode::InstantiateTypeArguments();
+  }
   constexpr Register kInstantiatorTypeArgumentsReg =
       InstantiationABI::kInstantiatorTypeArgumentsReg;
   constexpr Register kFunctionTypeArgumentsReg =
@@ -4511,7 +4551,7 @@ void IRTranslator::VisitInstantiateTypeArguments(
   constexpr Register kUninstantiatedTypeArgumentsReg =
       InstantiationABI::kUninstantiatedTypeArgumentsReg;
   LValue result = impl().GenerateCall(
-      instr, instr->token_pos(), instr->deopt_id(), instr->GetStub(),
+      instr, instr->token_pos(), instr->deopt_id(), *stub,
       RawPcDescriptors::kOther, 0,
       {{kInstantiatorTypeArgumentsReg, instantiator_type_args},
        {kFunctionTypeArgumentsReg, function_type_args},
