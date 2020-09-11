@@ -3666,42 +3666,42 @@ void IRTranslator::VisitStoreIndexed(StoreIndexedInstr* instr) {
       LValue gep =
           impl().BuildAccessPointer(array, offset_value, output().repo().ref64);
       EMASSERT(typeOf(value) == output().repo().int64)
-      output().buildStore(value, gep);
+      output().buildStoreUnaligned(value, gep);
       break;
     }
     case kTypedDataFloat32ArrayCid: {
       LValue gep = impl().BuildAccessPointer(array, offset_value,
                                              output().repo().refFloat);
       EMASSERT(typeOf(value) == output().repo().floatType)
-      output().buildStore(value, gep);
+      output().buildStoreUnaligned(value, gep);
       break;
     }
     case kTypedDataFloat64ArrayCid: {
       LValue gep = impl().BuildAccessPointer(array, offset_value,
                                              output().repo().refDouble);
       EMASSERT(typeOf(value) == output().repo().doubleType);
-      output().buildStore(value, gep);
+      output().buildStoreUnaligned(value, gep);
       break;
     }
     case kTypedDataFloat64x2ArrayCid: {
       LValue gep = impl().BuildAccessPointer(
           array, offset_value, pointerType(output().repo().float64x2));
       EMASSERT(typeOf(value) == output().repo().float64x2);
-      output().buildStore(value, gep);
+      output().buildStoreUnaligned(value, gep);
       break;
     }
     case kTypedDataInt32x4ArrayCid: {
       LValue gep = impl().BuildAccessPointer(
           array, offset_value, pointerType(output().repo().int32x4));
       EMASSERT(typeOf(value) == output().repo().int32x4);
-      output().buildStore(value, gep);
+      output().buildStoreUnaligned(value, gep);
       break;
     }
     case kTypedDataFloat32x4ArrayCid: {
       LValue gep = impl().BuildAccessPointer(
           array, offset_value, pointerType(output().repo().float32x4));
       EMASSERT(typeOf(value) == output().repo().float32x4);
-      output().buildStore(value, gep);
+      output().buildStoreUnaligned(value, gep);
       break;
     }
 

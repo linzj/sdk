@@ -271,8 +271,20 @@ LValue Output::buildLoadSmi(LValue toLoad) {
   return setInstrDebugLoc(load);
 }
 
-LValue Output::buildStore(LValue val, LValue pointer) {
-  return setInstrDebugLoc(dart_llvm::buildStore(builder_, val, pointer));
+void Output::buildStore(LValue val, LValue pointer) {
+  setInstrDebugLoc(dart_llvm::buildStore(builder_, val, pointer));
+}
+
+void Output::buildStoreUnaligned(LValue val, LValue toStore) {
+  LValue memcpy_function = repo().memcpyIntrinsic();
+  LType pointer_type = typeOf(toStore);
+  LType element_type = LLVMGetElementType(pointer_type);
+  LValue size_of_element_type = LLVMSizeOf(element_type);
+  buildStore(val, buildBitCast(bitcast_space_, pointer_type));
+  buildCall(memcpy_function, buildBitCast(toStore, repo().ref8),
+            buildBitCast(bitcast_space_, repo().ref8),
+            buildCast(LLVMTrunc, size_of_element_type, repo().int32),
+            repo().booleanFalse);
 }
 
 LValue Output::buildNeg(LValue val) {

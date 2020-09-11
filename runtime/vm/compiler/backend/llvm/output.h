@@ -48,7 +48,8 @@ class Output {
   LValue buildInvariantLoad(LValue toLoad);
   LValue buildLoadUnaligned(LValue toLoad);
   LValue buildLoadSmi(LValue toLoad);
-  LValue buildStore(LValue val, LValue pointer);
+  void buildStore(LValue val, LValue pointer);
+  void buildStoreUnaligned(LValue val, LValue pointer);
   LValue buildNeg(LValue val);
   LValue buildAdd(LValue lhs, LValue rhs);
   LValue buildFAdd(LValue lhs, LValue rhs);
