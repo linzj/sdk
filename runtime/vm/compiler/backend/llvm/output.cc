@@ -573,8 +573,7 @@ void Output::setDebugInfo(intptr_t linenum, const char* source_file_name) {
 #endif
 }
 
-#if defined(FEATURE_DEBUG_INFO)
-static bool ValueKindIsFind(LValue v) {
+static bool ValueKindIsFine(LValue v) {
   switch (LLVMGetValueKind(v)) {
     case LLVMConstantExprValueKind:
     case LLVMConstantIntValueKind:
@@ -586,19 +585,19 @@ static bool ValueKindIsFind(LValue v) {
       return true;
   }
 }
-#endif
 
 LValue Output::setInstrDebugLoc(LValue v) {
 #if defined(FEATURE_DEBUG_INFO)
-  if (ValueKindIsFind(v)) LLVMSetInstDebugLocation(builder_, v);
+  if (ValueKindIsFine(v)) LLVMSetInstDebugLocation(builder_, v);
 #endif
   return v;
 }
 
-void Output::assignEvenNumberAttr(LValue load) {
+void Output::assignEvenNumberAttr(LValue value) {
+  if (!ValueKindIsFine(value)) return;
   constexpr static const unsigned kMD_even_number = 30;
   LValue mdnode = LLVMMDNodeInContext(state_.context_, nullptr, 0);
-  LLVMSetMetadata(load, kMD_even_number, mdnode);
+  LLVMSetMetadata(value, kMD_even_number, mdnode);
 }
 
 void Output::assignCSRAttr(LValue call, const char* csr) {
