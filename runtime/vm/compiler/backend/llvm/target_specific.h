@@ -11,6 +11,7 @@ static const int kDwarfGenernalRegEnd = 15;
 
 static const Register kReceiverReg = R0;
 static const Register kICReg = R9;
+static const Register kInstanceOfTestCacheReg = R3;
 
 // Reg Call
 static const Register kCallTargetReg = R12;
@@ -59,6 +60,7 @@ static const int kDwarfGenernalRegEnd = 30;
 
 static const Register kReceiverReg = R0;
 static const Register kICReg = R5;
+static const Register kInstanceOfTestCacheReg = R3;
 
 // Reg Call
 static const Register kCallTargetReg = LR;

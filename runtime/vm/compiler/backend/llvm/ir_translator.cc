@@ -170,7 +170,8 @@ class AnonImpl {
       size_t stack_argument_count,
       const std::vector<std::pair<Register, LValue>>& gp_parameters) {
     return GenerateCall(instr, token_pos, deopt_id, nullptr, stub, nullptr,
-                        kind, stack_argument_count, gp_parameters);
+                        kind, stack_argument_count, true, nullptr,
+                        gp_parameters);
   }
 
   LValue GenerateCall(
@@ -182,6 +183,8 @@ class AnonImpl {
       const Code* fpu_stub,
       RawPcDescriptors::Kind kind,
       size_t stack_argument_count,
+      bool need_metadata,
+      LType return_type,
       const std::vector<std::pair<Register, LValue>>& gp_parameters);
   LValue GenerateRuntimeCall(Instruction*,
                              TokenPosition token_pos,
@@ -204,18 +207,6 @@ class AnonImpl {
                                          const Array& arguments_descriptor,
                                          intptr_t deopt_id,
                                          TokenPosition token_pos);
-  // InstanceOf
-#if 0
-  RawSubtypeTestCache* GenerateInlineInstanceof(
-      LValue value,
-      LValue instantiator_type_arguments, 
-      LValue function_type_arguments,
-      AssemblerResolver& resolver,
-      TokenPosition token_pos,
-      const AbstractType& type,
-      Label& is_instance_lbl,
-      Label& is_not_instance_lbl);
-#endif
   // Types
   LType GetMachineRepresentationType(Representation);
   LType DeduceReturnType();
@@ -228,7 +219,9 @@ class AnonImpl {
   LValue SmiUntag(LValue v);
   LValue IsSmi(LValue v);
   LValue BooleanToObject(LValue boolean);
+  LValue LoadIsolate();
   LValue LoadClassId(LValue o);
+  LValue LoadClassById(LValue clsid_val);
   LValue CompareClassId(LValue o, intptr_t clsid);
   LValue CompareObject(LValue, const Object&);
   LValue BitcastDoubleToInt64(LValue);
@@ -314,9 +307,8 @@ class AnonImpl {
   inline BlockEntryInstr* current_bb() { return current_bb_; }
   inline FlowGraph* flow_graph() { return flow_graph_; }
   inline Thread* thread() { return thread_; }
-  inline ObjectStore* object_store() {
-    return flow_graph()->isolate()->object_store();
-  }
+  inline ObjectStore* object_store() { return isolate()->object_store(); }
+  inline Isolate* isolate() { return flow_graph()->isolate(); }
 
   // CSR
   const char* GetSharedStubCSR();
@@ -342,6 +334,8 @@ class AnonImpl {
   const Class& int32x4_class() {
     return Class::ZoneHandle(object_store()->int32x4_class());
   }
+
+  bool IsListClass(const Class& cls) { return cls.raw() == list_class_->raw(); }
 
   Zone* zone() { return flow_graph_->zone(); }
   void set_exception_occured() { exception_occured_ = true; }
@@ -371,6 +365,7 @@ class AnonImpl {
   // Calls
   std::vector<LValue> pushed_arguments_;
   Thread* thread_;
+  const Class* list_class_;
   Environment* pending_deoptimization_env_ = nullptr;
   int patch_point_id_ = 0;
   bool visited_function_entry_ = false;
@@ -467,6 +462,7 @@ class CallResolver : public ContinuationResolver {
   void set_callee_save_register(const char* callee_save_registers) {
     callee_save_registers_ = callee_save_registers;
   }
+  void set_return_type(LType type) { return_type_ = type; }
 
  private:
   void GenerateStatePointFunction();
@@ -1028,6 +1024,8 @@ LValue AnonImpl::GenerateCall(
     const Code* fpu_stub,
     RawPcDescriptors::Kind kind,
     size_t stack_argument_count,
+    bool need_metadata,
+    LType return_type,
     const std::vector<std::pair<Register, LValue>>& gp_parameters) {
   if (!stub.InVMIsolateHeap()) {
     std::unique_ptr<CallSiteInfo> callsite_info(new CallSiteInfo);
@@ -1039,8 +1037,10 @@ LValue AnonImpl::GenerateCall(
     callsite_info->set_deopt_id(deopt_id);
     callsite_info->set_stack_parameter_count(stack_argument_count);
     callsite_info->set_instr_size(kCallInstrSize);
+    callsite_info->set_needs_metadata(need_metadata);
     CallResolver::CallResolverParameter param(instr, std::move(callsite_info));
     CallResolver resolver(*this, -1, param);
+    resolver.set_return_type(return_type);
     for (size_t i = 0; i < stack_argument_count; ++i) {
       LValue argument = pushed_arguments_.back();
       pushed_arguments_.pop_back();
@@ -1074,8 +1074,10 @@ LValue AnonImpl::GenerateCall(
     callsite_info->set_stack_parameter_count(stack_argument_count);
     callsite_info->set_instr_size(kCallInstrSize);
     callsite_info->set_code(&stub);
+    callsite_info->set_needs_metadata(need_metadata);
     CallResolver::CallResolverParameter param(instr, std::move(callsite_info));
     CallResolver resolver(*this, -1, param);
+    resolver.set_return_type(return_type);
     resolver.SetGParameter(Output::RegisterToParameterLoc(CODE_REG),
                            code_object);
     resolver.SetCallTarget(entry);
@@ -1342,12 +1344,35 @@ LValue AnonImpl::BooleanToObject(LValue boolean) {
                               LoadObject(Bool::False()));
 }
 
+LValue AnonImpl::LoadIsolate() {
+  LValue gep = output().buildGEPWithByteOffset(
+      output().thread(),
+      output().constIntPtr(compiler::target::Thread::isolate_offset()),
+      pointerType(output().repo().ref8));
+  return output().buildInvariantLoad(gep);
+}
+
 LValue AnonImpl::LoadClassId(LValue o) {
   const intptr_t class_id_offset =
       compiler::target::Object::tags_offset() +
       compiler::target::RawObject::kClassIdTagPos / kBitsPerByte;
   return LoadFieldFromOffset(o, class_id_offset,
                              pointerType(output().repo().int16));
+}
+
+LValue AnonImpl::LoadClassById(LValue clsid_val) {
+  const intptr_t table_offset =
+      compiler::target::Isolate::class_table_offset() +
+      compiler::target::ClassTable::table_offset();
+  LValue isolate = LoadIsolate();
+  LValue class_table_val = LoadFromOffset(
+      isolate, table_offset, pointerType(output().repo().ref8), true);
+  clsid_val = output().buildCast(LLVMZExt, clsid_val, output().repo().intPtr);
+  LValue clstable_offset = output().buildShl(
+      clsid_val, output().constIntPtr(compiler::target::kWordSizeLog2));
+  LValue gep = output().buildGEPWithByteOffset(
+      class_table_val, clstable_offset, pointerType(output().tagged_type()));
+  return output().buildLoad(gep);
 }
 
 LValue AnonImpl::CompareClassId(LValue o, intptr_t clsid) {
@@ -1849,8 +1874,11 @@ void ModifiedValuesMergeHelper::AssignBlockInitialValues(LBasicBlock bb) {
 
 void ModifiedValuesMergeHelper::InitialValuesInBlock(LBasicBlock bb) {
   auto found_initial_vals = initial_modified_values_lookup_.find(bb);
-  EMASSERT(found_initial_vals != initial_modified_values_lookup_.end());
-  current_modified_ = std::move(found_initial_vals->second);
+  if (found_initial_vals != initial_modified_values_lookup_.end()) {
+    current_modified_ = std::move(found_initial_vals->second);
+  } else {
+    current_modified_.clear();
+  }
 }
 
 void ModifiedValuesMergeHelper::InitialValuesInBlockToEmpty() {
@@ -2088,8 +2116,9 @@ void CallResolver::GenerateStatePointFunction() {
     callee_type_ = output().repo().ref8;
     return;
   }
-  return_type_ = impl().GetMachineRepresentationType(
-      call_resolver_parameter_.call_instruction->representation());
+  if (!return_type_)
+    return_type_ = impl().GetMachineRepresentationType(
+        call_resolver_parameter_.call_instruction->representation());
   std::vector<LType> operand_value_types;
   for (LValue param : parameters_) {
     operand_value_types.emplace_back(typeOf(param));
@@ -2757,6 +2786,8 @@ IRTranslator::IRTranslator(FlowGraph* flow_graph, Precompiler* precompiler)
           .ToCString()));
   impl().liveness_analysis_.reset(new LivenessAnalysis(flow_graph));
   impl().output_.reset(new Output(impl().compiler_state()));
+  impl().list_class_ = &Class::ZoneHandle(
+      Library::Handle(Library::CoreLibrary()).LookupClass(Symbols::List()));
   // init parameter desc
   RegisterParameterDesc parameter_desc;
   LType tagged_type = output().repo().tagged_type;
@@ -3852,15 +3883,461 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
       impl().GetLLVMValue(instr->instantiator_type_arguments());
   LValue function_type_arguments =
       impl().GetLLVMValue(instr->function_type_arguments());
-  LValue null_object = impl().GetNull();
-  impl().PushArgument(instance);
-  impl().PushArgument(impl().LoadObject(instr->type()));
-  impl().PushArgument(instantiator_type_arguments);
-  impl().PushArgument(function_type_arguments);
-  impl().PushArgument(null_object);  // cache
-  LValue result = impl().GenerateRuntimeCall(
-      instr, instr->token_pos(), instr->deopt_id(), kInstanceofRuntimeEntry, 5);
-  impl().SetLLVMValue(instr, result);
+
+  AssemblerResolver resolver(impl());
+
+  Label is_instance("instanceof_is_instance"),
+      is_not_instance("instanceof_is_not_instance");
+  const AbstractType& type = instr->type();
+  const AbstractType& unwrapped_type =
+      AbstractType::Handle(type.UnwrapFutureOr());
+  if (!unwrapped_type.IsTypeParameter() || unwrapped_type.IsNullable()) {
+    // Only nullable type parameter remains nullable after instantiation.
+    // See NullIsInstanceOf().
+    LValue cmp = impl().CompareObject(instance, Object::null_object());
+    Label* label = (unwrapped_type.IsNullable() ||
+                    (unwrapped_type.IsLegacy() && unwrapped_type.IsNeverType()))
+                       ? &is_instance
+                       : &is_not_instance;
+    resolver.BranchIf(cmp, *label);
+  }
+  // Generate inline instanceof test.
+
+  auto GenerateCallNoMetadata =
+      [&](Instruction* instr, TokenPosition token_pos, intptr_t deopt_id,
+          const Code& stub,
+          const std::vector<std::pair<Register, LValue>>& gp_parameters) {
+        return impl().GenerateCall(instr, token_pos, deopt_id,
+                                   impl().GetSharedStubCSR(), stub, nullptr,
+                                   RawPcDescriptors::kOther, 0, false,
+                                   output().tagged_pair(), gp_parameters);
+      };
+  auto GenerateBoolToJump = [&](LValue value, Label& is_true, Label& is_false) {
+    Label fall_through("fall_through");
+    LValue cmp = impl().CompareObject(value, Object::null_object());
+    resolver.BranchIf(cmp, fall_through);
+    cmp = impl().CompareObject(value, Bool::True());
+    resolver.BranchIf(cmp, is_true);
+    resolver.Branch(is_false);
+    resolver.Bind(fall_through);
+  };
+  enum TypeTestStubKind {
+    kTestTypeOneArg,
+    kTestTypeTwoArgs,
+    kTestTypeFourArgs,
+    kTestTypeSixArgs,
+  };
+  auto GenerateCallSubtypeTestStub = [&](TypeTestStubKind test_kind) {
+    const SubtypeTestCache& type_test_cache =
+        SubtypeTestCache::ZoneHandle(impl().zone(), SubtypeTestCache::New());
+    LValue type_test_cache_value = impl().LoadObject(type_test_cache, true);
+    LValue result;
+    static constexpr const auto kInstanceReg = TypeTestABI::kInstanceReg;
+    static constexpr const auto kInstantiatorTypeArgumentsReg =
+        TypeTestABI::kInstantiatorTypeArgumentsReg;
+    static constexpr const auto kFunctionTypeArgumentsReg =
+        TypeTestABI::kFunctionTypeArgumentsReg;
+    if (test_kind == kTestTypeOneArg) {
+      result = GenerateCallNoMetadata(
+          instr, instr->token_pos(), instr->deopt_id(),
+          StubCode::Subtype1TestCache(),
+          {{kInstanceOfTestCacheReg, type_test_cache_value},
+           {kInstanceReg, instance}});
+    } else if (test_kind == kTestTypeTwoArgs) {
+      result = GenerateCallNoMetadata(
+          instr, instr->token_pos(), instr->deopt_id(),
+          StubCode::Subtype2TestCache(),
+          {{kInstanceOfTestCacheReg, type_test_cache_value},
+           {kInstanceReg, instance}});
+    } else if (test_kind == kTestTypeFourArgs) {
+      result = GenerateCallNoMetadata(
+          instr, instr->token_pos(), instr->deopt_id(),
+          StubCode::Subtype4TestCache(),
+          {{kInstanceOfTestCacheReg, type_test_cache_value},
+           {kInstanceReg, instance},
+           {kInstantiatorTypeArgumentsReg, instantiator_type_arguments},
+           {kFunctionTypeArgumentsReg, function_type_arguments}});
+    } else if (test_kind == kTestTypeSixArgs) {
+      result = GenerateCallNoMetadata(
+          instr, instr->token_pos(), instr->deopt_id(),
+          StubCode::Subtype6TestCache(),
+          {{kInstanceOfTestCacheReg, type_test_cache_value},
+           {kInstanceReg, instance},
+           {kInstantiatorTypeArgumentsReg, instantiator_type_arguments},
+           {kFunctionTypeArgumentsReg, function_type_arguments}});
+    } else {
+      UNREACHABLE();
+    }
+    // Result is in R1: null -> not found, otherwise Bool::True or Bool::False.
+    GenerateBoolToJump(output().buildExtractValue(result, 1), is_instance,
+                       is_not_instance);
+    return type_test_cache.raw();
+  };
+
+  auto CheckClassIds = [&](LValue clsid_val,
+                           const GrowableArray<intptr_t>& class_ids,
+                           Label& is_equal_lbl, Label& is_not_equal_lbl) {
+    clsid_val = output().buildCast(LLVMZExt, clsid_val, output().repo().intPtr);
+    for (intptr_t i = 0; i < class_ids.length(); i++) {
+      LValue cmp = output().buildICmp(LLVMIntEQ, clsid_val,
+                                      output().constIntPtr(class_ids[i]));
+      resolver.BranchIf(cmp, is_equal_lbl);
+    }
+    resolver.Branch(is_not_equal_lbl);
+  };
+
+  auto GenerateListTypeCheck = [&](LValue clsid_val, Label& is_instance) {
+    Label unknown("unknown");
+    GrowableArray<intptr_t> args;
+    args.Add(kArrayCid);
+    args.Add(kGrowableObjectArrayCid);
+    args.Add(kImmutableArrayCid);
+    CheckClassIds(clsid_val, args, is_instance, unknown);
+    resolver.Bind(unknown);
+  };
+  auto GenerateNumberTypeCheck = [&](LValue clsid_val, const AbstractType& type,
+                                     Label& is_instance,
+                                     Label& is_not_instance) {
+    GrowableArray<intptr_t> args;
+    if (type.IsNumberType()) {
+      args.Add(kDoubleCid);
+      args.Add(kMintCid);
+    } else if (type.IsIntType()) {
+      args.Add(kMintCid);
+    } else if (type.IsDoubleType()) {
+      args.Add(kDoubleCid);
+    }
+    CheckClassIds(clsid_val, args, is_instance, is_not_instance);
+  };
+
+  auto GenerateStringTypeCheck = [&](LValue clsid_val, Label& is_instance_lbl,
+                                     Label& is_not_instance_lbl) {
+    GrowableArray<intptr_t> args;
+    args.Add(kOneByteStringCid);
+    args.Add(kTwoByteStringCid);
+    args.Add(kExternalOneByteStringCid);
+    args.Add(kExternalTwoByteStringCid);
+    CheckClassIds(clsid_val, args, is_instance_lbl, is_not_instance_lbl);
+  };
+  auto GenerateFunctionTypeTest = [&]() {
+    resolver.BranchIf(impl().IsSmi(instance), is_not_instance);
+    return GenerateCallSubtypeTestStub(kTestTypeSixArgs);
+  };
+  auto GenerateSubtype1TestCacheLookup = [&](const Class& type_class) {
+    LValue clsid = impl().LoadClassId(instance);
+    LValue cls = impl().LoadClassById(clsid);
+    LValue super_type = impl().LoadFieldFromOffset(
+        cls, compiler::target::Class::super_type_offset());
+    LValue typecls_id = impl().LoadFieldFromOffset(
+        super_type, compiler::target::Type::type_class_id_offset(),
+        output().repo().refPtr);
+    LValue cmp = output().buildICmp(
+        LLVMIntEQ, typecls_id,
+        output().constIntPtr(Smi::RawValue(type_class.id())));
+    resolver.BranchIf(cmp, is_instance);
+
+    return GenerateCallSubtypeTestStub(kTestTypeOneArg);
+  };
+
+  auto EmitTestAndCallCheckCid = [&](Label* label, LValue clsid_val,
+                                     const CidRangeValue& range, int bias,
+                                     bool jump_on_miss) {
+    intptr_t cid_start = range.cid_start;
+    if (range.IsSingleCid()) {
+      LValue cmp =
+          output().buildICmp(jump_on_miss ? LLVMIntNE : LLVMIntEQ, clsid_val,
+                             output().constIntPtr(bias - cid_start));
+      resolver.BranchIf(cmp, *label);
+      bias = cid_start;
+    } else {
+      LValue added =
+          output().buildAdd(clsid_val, output().constIntPtr(bias - cid_start));
+      LValue cmp =
+          output().buildICmp(jump_on_miss ? LLVMIntUGT : LLVMIntULE, added,
+                             output().constIntPtr(range.Extent()));
+      resolver.BranchIf(cmp, *label);
+      bias = cid_start;
+    }
+    return bias;
+  };
+  auto GenerateCidRangesCheck = [&](LValue clsid_val,
+                                    const CidRangeVector& cid_ranges,
+                                    Label* inside_range_lbl,
+                                    Label* outside_range_lbl = nullptr,
+                                    bool fall_through_if_inside = false) {
+    // If there are no valid class ranges, the check will fail.  If we are
+    // supposed to fall-through in the positive case, we'll explicitly jump to
+    // the [outside_range_lbl].
+    if (cid_ranges.length() == 1 && cid_ranges[0].IsIllegalRange()) {
+      if (fall_through_if_inside) {
+        EMASSERT(!!outside_range_lbl);
+        resolver.Branch(*outside_range_lbl);
+      }
+      return;
+    }
+
+    int bias = 0;
+    for (intptr_t i = 0; i < cid_ranges.length(); ++i) {
+      const CidRangeValue& range = cid_ranges[i];
+      RELEASE_ASSERT(!range.IsIllegalRange());
+      const bool last_round = i == (cid_ranges.length() - 1);
+
+      Label* jump_label = last_round && fall_through_if_inside
+                              ? outside_range_lbl
+                              : inside_range_lbl;
+      const bool jump_on_miss = last_round && fall_through_if_inside;
+
+      bias = EmitTestAndCallCheckCid(jump_label, clsid_val, range, bias,
+                                     jump_on_miss);
+    }
+  };
+  auto GenerateSubtypeRangeCheck =
+      [&](LValue clsid_val, const Class& type_class, Label& is_subtype) {
+        static const intptr_t kMaxNumberOfCidRangesToTest = 4;
+        HierarchyInfo* hi = Thread::Current()->hierarchy_info();
+        if (hi != NULL) {
+          const CidRangeVector& ranges =
+              hi->SubtypeRangesForClass(type_class,
+                                        /*include_abstract=*/false,
+                                        /*exclude_null=*/false);
+          if (ranges.length() <= kMaxNumberOfCidRangesToTest) {
+            GenerateCidRangesCheck(clsid_val, ranges, &is_subtype);
+            return true;
+          }
+        }
+
+        // We don't have cid-ranges for subclasses, so we'll just test against the
+        // class directly if it's non-abstract.
+        if (!type_class.is_abstract()) {
+          LValue cmp = output().buildICmp(
+              LLVMIntEQ, clsid_val, output().constIntPtr(type_class.id()));
+          resolver.BranchIf(cmp, is_subtype);
+        }
+        return false;
+      };
+  auto GenerateInstantiatedTypeNoArgumentsTest = [&]() {
+    ASSERT(type.IsInstantiated());
+    ASSERT(!type.IsFunctionType());
+    const Class& type_class = Class::Handle(impl().zone(), type.type_class());
+    ASSERT(type_class.NumTypeArguments() == 0);
+
+    LValue is_smi = impl().IsSmi(instance);
+    // If instance is Smi, check directly.
+    const Class& smi_class = Class::Handle(impl().zone(), Smi::Class());
+    if (Class::IsSubtypeOf(smi_class, Object::null_type_arguments(),
+                           Nullability::kNonNullable, type, Heap::kOld)) {
+      // Fast case for type = int/num/top-type.
+      resolver.BranchIf(is_smi, is_instance);
+    } else {
+      resolver.BranchIf(is_smi, is_not_instance);
+    }
+    LValue clsid_val = impl().LoadClassId(instance);
+    clsid_val = output().buildCast(LLVMZExt, clsid_val, output().repo().intPtr);
+    // Bool interface can be implemented only by core class Bool.
+    if (type.IsBoolType()) {
+      LValue cmp = output().buildICmp(LLVMIntEQ, clsid_val,
+                                      output().constIntPtr(kBoolCid));
+      resolver.BranchIf(cmp, is_instance);
+      resolver.Branch(is_not_instance);
+      return false;
+    }
+    // Custom checking for numbers (Smi, Mint and Double).
+    // Note that instance is not Smi (checked above).
+    if (type.IsNumberType() || type.IsIntType() || type.IsDoubleType()) {
+      GenerateNumberTypeCheck(clsid_val, type, is_instance, is_not_instance);
+      return false;
+    }
+    if (type.IsStringType()) {
+      GenerateStringTypeCheck(clsid_val, is_instance, is_not_instance);
+      return false;
+    }
+    if (type.IsDartFunctionType()) {
+      // Check if instance is a closure.
+      LValue cmp = output().buildICmp(LLVMIntEQ, clsid_val,
+                                      output().constIntPtr(kClosureCid));
+      resolver.BranchIf(cmp, is_instance);
+      return true;  // Fall through
+    }
+
+    // Fast case for cid-range based checks.
+    // Warning: This code destroys the contents of [kClassIdReg].
+    if (GenerateSubtypeRangeCheck(clsid_val, type_class, is_instance)) {
+      return false;
+    }
+
+    // Otherwise fallthrough, result non-conclusive.
+    return true;
+  };
+  auto GenerateInstantiatedTypeWithArgumentsTest = [&]() {
+    ASSERT(type.IsInstantiated());
+    ASSERT(!type.IsFunctionType());
+    const Class& type_class =
+        Class::ZoneHandle(impl().zone(), type.type_class());
+    ASSERT(type_class.NumTypeArguments() > 0);
+    const Type& smi_type = Type::Handle(impl().zone(), Type::SmiType());
+    const bool smi_is_ok = smi_type.IsSubtypeOf(type, Heap::kOld);
+    LValue is_smi = impl().IsSmi(instance);
+    if (smi_is_ok) {
+      // Fast case for type = FutureOr<int/num/top-type>.
+      resolver.BranchIf(is_smi, is_instance);
+    } else {
+      resolver.BranchIf(is_smi, is_not_instance);
+    }
+    const intptr_t num_type_args = type_class.NumTypeArguments();
+    const intptr_t num_type_params = type_class.NumTypeParameters();
+    const intptr_t from_index = num_type_args - num_type_params;
+    const TypeArguments& type_arguments =
+        TypeArguments::ZoneHandle(impl().zone(), type.arguments());
+    const bool is_raw_type = type_arguments.IsNull() ||
+                             type_arguments.IsRaw(from_index, num_type_params);
+    if (is_raw_type) {
+      // dynamic type argument, check only classes.
+      LValue cmp = impl().CompareClassId(instance, type_class.id());
+      resolver.BranchIf(cmp, is_instance);
+      // List is a very common case.
+      if (impl().IsListClass(type_class)) {
+        GenerateListTypeCheck(impl().LoadClassId(instance), is_instance);
+      }
+      return GenerateSubtype1TestCacheLookup(type_class);
+    }
+    // If one type argument only, check if type argument is a top type.
+    if (type_arguments.Length() == 1) {
+      const AbstractType& tp_argument =
+          AbstractType::ZoneHandle(impl().zone(), type_arguments.TypeAt(0));
+      if (tp_argument.IsTopType()) {
+        // Instance class test only necessary.
+        return GenerateSubtype1TestCacheLookup(type_class);
+      }
+    }
+
+    // Regular subtype test cache involving instance's type arguments.
+    return GenerateCallSubtypeTestStub(kTestTypeTwoArgs);
+  };
+
+  auto GetTypeTestStubKindForTypeParameter =
+      [&](const TypeParameter& type_param) {
+        // If it's guaranteed, by type-parameter bound, that the type parameter will
+        // never have a value of a function type, then we can safely do a 4-type
+        // test instead of a 6-type test.
+        AbstractType& bound =
+            AbstractType::Handle(impl().zone(), type_param.bound());
+        bound = bound.UnwrapFutureOr();
+        return !bound.IsTopType() && !bound.IsObjectType() &&
+                       !bound.IsFunctionType() && !bound.IsDartFunctionType() &&
+                       bound.IsType()
+                   ? kTestTypeFourArgs
+                   : kTestTypeSixArgs;
+      };
+  auto GenerateUninstantiatedTypeTest = [&]() {
+    ASSERT(!type.IsInstantiated());
+    ASSERT(!type.IsFunctionType());
+    // Skip check if destination is a dynamic type.
+    if (type.IsTypeParameter()) {
+      const TypeParameter& type_param = TypeParameter::Cast(type);
+
+      // Get instantiator type args (high) and function type args (low).
+      LValue type_arguments_val = type_param.IsClassTypeParameter()
+                                      ? instantiator_type_arguments
+                                      : function_type_arguments;
+
+      // Check if type arguments are null, i.e. equivalent to vector of dynamic.
+      LValue cmp =
+          impl().CompareObject(type_arguments_val, Object::null_object());
+      resolver.BranchIf(cmp, is_instance);
+      LValue type = impl().LoadFieldFromOffset(
+          type_arguments_val,
+          TypeArguments::type_at_offset(type_param.index()));
+      // Check if type argument is dynamic, Object?, or void.
+      cmp = impl().CompareObject(type, Object::dynamic_type());
+      resolver.BranchIf(cmp, is_instance);
+      cmp = impl().CompareObject(
+          type, Type::ZoneHandle(
+                    impl().zone(),
+                    impl().isolate()->object_store()->nullable_object_type()));
+      resolver.BranchIf(cmp, is_instance);
+      cmp = impl().CompareObject(type, Object::void_type());
+      resolver.BranchIf(cmp, is_instance);
+
+      // For Smi check quickly against int and num interfaces.
+      Label not_smi("not_smi");
+      LValue is_smi = impl().IsSmi(instance);
+      resolver.BranchIfNot(is_smi, not_smi);
+      cmp = impl().CompareObject(
+          type, Type::ZoneHandle(impl().zone(), Type::IntType()));
+      resolver.BranchIf(cmp, is_instance);
+      cmp = impl().CompareObject(
+          type, Type::ZoneHandle(impl().zone(), Type::Number()));
+      resolver.BranchIf(cmp, is_instance);
+      resolver.Branch(not_smi);
+      // Smi can be handled by type test cache.
+      resolver.Bind(not_smi);
+
+      const auto test_kind = GetTypeTestStubKindForTypeParameter(type_param);
+      const SubtypeTestCache& type_test_cache = SubtypeTestCache::ZoneHandle(
+          impl().zone(), GenerateCallSubtypeTestStub(test_kind));
+      return type_test_cache.raw();
+    }
+    if (type.IsType()) {
+      // Smi is FutureOr<T>, when T is a top type or int or num.
+      if (!type.IsFutureOrType()) {
+        LValue is_smi = impl().IsSmi(instance);
+        resolver.BranchIf(is_smi, is_not_instance);
+      }
+      // Uninstantiated type class is known at compile time, but the type
+      // arguments are determined at runtime by the instantiator.
+      return GenerateCallSubtypeTestStub(kTestTypeFourArgs);
+    }
+    return SubtypeTestCache::null();
+  };
+  auto GenerateInlineInstanceof = [&]() {
+    if (type.IsFunctionType()) {
+      return GenerateFunctionTypeTest();
+    }
+
+    if (type.IsInstantiated()) {
+      const Class& type_class =
+          Class::ZoneHandle(impl().zone(), type.type_class());
+      // A class equality check is only applicable with a dst type (not a
+      // function type) of a non-parameterized class or with a raw dst type of
+      // a parameterized class.
+      if (type_class.NumTypeArguments() > 0) {
+        return GenerateInstantiatedTypeWithArgumentsTest();
+        // Fall through to runtime call.
+      }
+      const bool has_fall_through = GenerateInstantiatedTypeNoArgumentsTest();
+      if (has_fall_through) {
+        // If test non-conclusive so far, try the inlined type-test cache.
+        // 'type' is known at compile time.
+        return GenerateSubtype1TestCacheLookup(type_class);
+      } else {
+        return SubtypeTestCache::null();
+      }
+    }
+    return GenerateUninstantiatedTypeTest();
+  };
+  SubtypeTestCache& test_cache = SubtypeTestCache::ZoneHandle(impl().zone());
+  test_cache = GenerateInlineInstanceof();
+
+  if (!test_cache.IsNull()) {
+    LValue null_object = impl().GetNull();
+    impl().PushArgument(instance);
+    impl().PushArgument(impl().LoadObject(instr->type()));
+    impl().PushArgument(instantiator_type_arguments);
+    impl().PushArgument(function_type_arguments);
+    impl().PushArgument(null_object);  // cache
+    LValue result =
+        impl().GenerateRuntimeCall(instr, instr->token_pos(), instr->deopt_id(),
+                                   kInstanceofRuntimeEntry, 5);
+    resolver.GotoMergeWithValue(result);
+  } else {
+    resolver.Branch(is_not_instance);
+  }
+  resolver.Bind(is_instance);
+  resolver.GotoMergeWithValue(impl().LoadObject(Bool::Get(true)));
+
+  resolver.Bind(is_not_instance);
+  resolver.GotoMergeWithValue(impl().LoadObject(Bool::Get(false)));
+  impl().SetLLVMValue(instr, resolver.End());
 }
 
 void IRTranslator::VisitCreateArray(CreateArrayInstr* instr) {
@@ -4442,7 +4919,7 @@ void IRTranslator::VisitCheckStackOverflow(CheckStackOverflowInstr* instr) {
         impl().object_store()->stack_overflow_stub_with_fpu_regs_stub());
     impl().GenerateCall(instr, instr->token_pos(), DeoptId::kNone,
                         impl().GetSharedStubCSR(), stub, &fpu_stub,
-                        RawPcDescriptors::kOther, 0, {});
+                        RawPcDescriptors::kOther, 0, true, nullptr, {});
   } else {
     std::unique_ptr<CallSiteInfo> callsite_info(new CallSiteInfo);
     callsite_info->set_type(CallSiteInfo::CallTargetType::kThreadOffset);
@@ -4896,7 +5373,8 @@ void IRTranslator::VisitBoxInt64(BoxInt64Instr* instr) {
           impl().object_store()->allocate_mint_with_fpu_regs_stub());
       result = impl().GenerateCall(instr, instr->token_pos(), DeoptId::kNone,
                                    impl().GetBoxInt64SharedStubCSR(), stub,
-                                   &fpu_stub, RawPcDescriptors::kOther, 0, {});
+                                   &fpu_stub, RawPcDescriptors::kOther, 0, true,
+                                   nullptr, {});
     } else {
       BoxAllocationSlowPath allocate(instr, impl().mint_class(), impl());
       result = allocate.Allocate();
