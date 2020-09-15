@@ -314,6 +314,7 @@ class AnonImpl {
   const char* GetSharedStubCSR();
   const char* GetCCallCSR();
   const char* GetBoxInt64SharedStubCSR();
+  const char* GetInstanceOfTestCacheCSR();
   // classes
   const Class& mint_class() {
     return Class::ZoneHandle(object_store()->mint_class());
@@ -3909,8 +3910,8 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
           const Code& stub,
           const std::vector<std::pair<Register, LValue>>& gp_parameters) {
         return impl().GenerateCall(instr, token_pos, deopt_id,
-                                   impl().GetSharedStubCSR(), stub, nullptr,
-                                   RawPcDescriptors::kOther, 0, false,
+                                   impl().GetInstanceOfTestCacheCSR(), stub,
+                                   nullptr, RawPcDescriptors::kOther, 0, false,
                                    output().tagged_pair(), gp_parameters);
       };
   auto GenerateBoolToJump = [&](LValue value, Label& is_true, Label& is_false) {
@@ -3928,33 +3929,37 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
     kTestTypeFourArgs,
     kTestTypeSixArgs,
   };
+  SubtypeTestCache& test_cache = SubtypeTestCache::ZoneHandle(impl().zone());
+
   auto GenerateCallSubtypeTestStub = [&](TypeTestStubKind test_kind) {
-    const SubtypeTestCache& type_test_cache =
-        SubtypeTestCache::ZoneHandle(impl().zone(), SubtypeTestCache::New());
-    LValue type_test_cache_value = impl().LoadObject(type_test_cache, true);
+    test_cache = SubtypeTestCache::New();
+    LValue test_cache_value;
+    test_cache_value = impl().LoadObject(test_cache, true);
     LValue result;
     static constexpr const auto kInstanceReg = TypeTestABI::kInstanceReg;
     static constexpr const auto kInstantiatorTypeArgumentsReg =
         TypeTestABI::kInstantiatorTypeArgumentsReg;
     static constexpr const auto kFunctionTypeArgumentsReg =
         TypeTestABI::kFunctionTypeArgumentsReg;
+    static constexpr const auto kInstanceOfTestCacheReg =
+        TypeTestABI::kSubtypeTestCacheReg;
     if (test_kind == kTestTypeOneArg) {
-      result = GenerateCallNoMetadata(
-          instr, instr->token_pos(), instr->deopt_id(),
-          StubCode::Subtype1TestCache(),
-          {{kInstanceOfTestCacheReg, type_test_cache_value},
-           {kInstanceReg, instance}});
+      result =
+          GenerateCallNoMetadata(instr, instr->token_pos(), instr->deopt_id(),
+                                 StubCode::Subtype1TestCache(),
+                                 {{kInstanceOfTestCacheReg, test_cache_value},
+                                  {kInstanceReg, instance}});
     } else if (test_kind == kTestTypeTwoArgs) {
-      result = GenerateCallNoMetadata(
-          instr, instr->token_pos(), instr->deopt_id(),
-          StubCode::Subtype2TestCache(),
-          {{kInstanceOfTestCacheReg, type_test_cache_value},
-           {kInstanceReg, instance}});
+      result =
+          GenerateCallNoMetadata(instr, instr->token_pos(), instr->deopt_id(),
+                                 StubCode::Subtype2TestCache(),
+                                 {{kInstanceOfTestCacheReg, test_cache_value},
+                                  {kInstanceReg, instance}});
     } else if (test_kind == kTestTypeFourArgs) {
       result = GenerateCallNoMetadata(
           instr, instr->token_pos(), instr->deopt_id(),
           StubCode::Subtype4TestCache(),
-          {{kInstanceOfTestCacheReg, type_test_cache_value},
+          {{kInstanceOfTestCacheReg, test_cache_value},
            {kInstanceReg, instance},
            {kInstantiatorTypeArgumentsReg, instantiator_type_arguments},
            {kFunctionTypeArgumentsReg, function_type_arguments}});
@@ -3962,7 +3967,7 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
       result = GenerateCallNoMetadata(
           instr, instr->token_pos(), instr->deopt_id(),
           StubCode::Subtype6TestCache(),
-          {{kInstanceOfTestCacheReg, type_test_cache_value},
+          {{kInstanceOfTestCacheReg, test_cache_value},
            {kInstanceReg, instance},
            {kInstantiatorTypeArgumentsReg, instantiator_type_arguments},
            {kFunctionTypeArgumentsReg, function_type_arguments}});
@@ -3972,7 +3977,7 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
     // Result is in R1: null -> not found, otherwise Bool::True or Bool::False.
     GenerateBoolToJump(output().buildExtractValue(result, 1), is_instance,
                        is_not_instance);
-    return type_test_cache.raw();
+    return true;
   };
 
   auto CheckClassIds = [&](LValue clsid_val,
@@ -4274,9 +4279,7 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
       resolver.Bind(not_smi);
 
       const auto test_kind = GetTypeTestStubKindForTypeParameter(type_param);
-      const SubtypeTestCache& type_test_cache = SubtypeTestCache::ZoneHandle(
-          impl().zone(), GenerateCallSubtypeTestStub(test_kind));
-      return type_test_cache.raw();
+      return GenerateCallSubtypeTestStub(test_kind);
     }
     if (type.IsType()) {
       // Smi is FutureOr<T>, when T is a top type or int or num.
@@ -4288,7 +4291,7 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
       // arguments are determined at runtime by the instantiator.
       return GenerateCallSubtypeTestStub(kTestTypeFourArgs);
     }
-    return SubtypeTestCache::null();
+    return false;
   };
   auto GenerateInlineInstanceof = [&]() {
     if (type.IsFunctionType()) {
@@ -4311,21 +4314,21 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
         // 'type' is known at compile time.
         return GenerateSubtype1TestCacheLookup(type_class);
       } else {
-        return SubtypeTestCache::null();
+        return false;
       }
     }
     return GenerateUninstantiatedTypeTest();
   };
-  SubtypeTestCache& test_cache = SubtypeTestCache::ZoneHandle(impl().zone());
-  test_cache = GenerateInlineInstanceof();
+  bool has_test_cache = GenerateInlineInstanceof();
+  (void)has_test_cache;
 
+  EMASSERT((!test_cache.IsNull()) == has_test_cache);
   if (!test_cache.IsNull()) {
-    LValue null_object = impl().GetNull();
     impl().PushArgument(instance);
     impl().PushArgument(impl().LoadObject(instr->type()));
     impl().PushArgument(instantiator_type_arguments);
     impl().PushArgument(function_type_arguments);
-    impl().PushArgument(null_object);  // cache
+    impl().PushArgument(impl().LoadObject(test_cache));
     LValue result =
         impl().GenerateRuntimeCall(instr, instr->token_pos(), instr->deopt_id(),
                                    kInstanceofRuntimeEntry, 5);
