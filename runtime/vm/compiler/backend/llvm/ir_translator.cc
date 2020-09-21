@@ -3974,6 +3974,7 @@ void IRTranslator::VisitInstanceOf(InstanceOfInstr* instr) {
     } else {
       UNREACHABLE();
     }
+    instance = output().buildExtractValue(result, 0);
     // Result is in R1: null -> not found, otherwise Bool::True or Bool::False.
     GenerateBoolToJump(output().buildExtractValue(result, 1), is_instance,
                        is_not_instance);
