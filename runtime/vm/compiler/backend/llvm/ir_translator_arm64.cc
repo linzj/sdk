@@ -71,7 +71,7 @@ const char* AnonImpl::GetBoxInt64SharedStubCSR() {
 }
 
 const char* AnonImpl::GetInstanceOfTestCacheCSR() {
-  return "x5,x11,x12,x13,x14,"
+  return "x11,x12,x13,x14,"
          "x15,x18,x19,x20,x21,x22,x24,x26,x27,x28,q0,q1,"
          "q2,q3,q4,q5,q6,q7,q8,q9,q10,q11,q12,q13,q14,q15,q16,"
          "q17,q18,q19,q20,q21,q22,q23,q24,q25,q26,q27,q28,q29,"

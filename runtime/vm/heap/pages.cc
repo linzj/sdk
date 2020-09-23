@@ -994,7 +994,9 @@ bool PageSpace::ShouldPerformIdleMarkCompact(int64_t deadline) {
       usage_.capacity_in_words - usage_.used_in_words - 2 * kPageSizeInWords;
   const double excess_ratio = static_cast<double>(excess_in_words) /
                               static_cast<double>(usage_.capacity_in_words);
-  const bool fragmented = excess_ratio > 0.05;
+#if defined(UC_BUILD_LLVM_COMPILER)
+  const bool fragmented = excess_ratio > 0.15;
+#endif
 
   if (!fragmented &&
       !page_space_controller_.NeedsIdleGarbageCollection(usage_)) {
