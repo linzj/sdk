@@ -2961,6 +2961,13 @@ Definition* InstantiateTypeArgumentsInstr::Canonicalize(FlowGraph* flow_graph) {
   return HasUses() ? this : NULL;
 }
 
+bool InstantiateTypeArgumentsInstr::AttributesEqual(Instruction* other) const {
+  InstantiateTypeArgumentsInstr* other_ita =
+      other->AsInstantiateTypeArguments();
+  return other_ita->type_arguments_.raw() == type_arguments_.raw() &&
+         other_ita->instantiator_class_.raw() == instantiator_class_.raw();
+}
+
 LocationSummary* DebugStepCheckInstr::MakeLocationSummary(Zone* zone,
                                                           bool opt) const {
   const intptr_t kNumInputs = 0;

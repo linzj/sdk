@@ -91,6 +91,8 @@ class DominatorBasedCSE : public AllStatic {
   static bool OptimizeRecursive(FlowGraph* graph,
                                 BlockEntryInstr* entry,
                                 CSEInstructionMap* map);
+  static bool HoistFullyReduandantRecursive(FlowGraph* graph,
+                                            BlockEntryInstr* block);
 };
 
 class DeadStoreElimination : public AllStatic {

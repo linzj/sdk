@@ -1127,6 +1127,7 @@ class Instruction : public ZoneAllocated {
   // GetDeoptId and/or CopyDeoptIdFrom.
   friend class CallSiteInliner;
   friend class LICM;
+  friend class DominatorBasedCSE;
   friend class ComparisonInstr;
   friend class Scheduler;
   friend class BlockEntryInstr;
@@ -6255,6 +6256,9 @@ class InstantiateTypeArgumentsInstr : public TemplateDefinition<2, Throws> {
   virtual bool HasUnknownSideEffects() const { return false; }
 
   virtual Definition* Canonicalize(FlowGraph* flow_graph);
+
+  virtual bool AllowsCSE() const { return true; }
+  virtual bool AttributesEqual(Instruction* other) const;
 
   const Code& GetStub() const {
     bool with_runtime_check;

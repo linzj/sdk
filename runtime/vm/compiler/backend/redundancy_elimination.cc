@@ -2475,6 +2475,8 @@ bool DominatorBasedCSE::Optimize(FlowGraph* graph) {
     changed = LoadOptimizer::OptimizeGraph(graph) || changed;
   }
 
+  changed = HoistFullyReduandantRecursive(graph, graph->graph_entry());
+
   CSEInstructionMap map;
   changed = OptimizeRecursive(graph, graph->graph_entry(), &map) || changed;
 
@@ -2517,6 +2519,81 @@ bool DominatorBasedCSE::OptimizeRecursive(FlowGraph* graph,
       // Reuse map for the last child.
       changed = OptimizeRecursive(graph, child, map) || changed;
     }
+  }
+  return changed;
+}
+
+bool DominatorBasedCSE::HoistFullyReduandantRecursive(FlowGraph* graph,
+                                                      BlockEntryInstr* block) {
+  intptr_t num_children = block->dominated_blocks().length();
+  bool changed = false;
+  if (block->IsGraphEntry()) {
+    for (intptr_t i = 0; i < num_children; ++i) {
+      BlockEntryInstr* child = block->dominated_blocks()[i];
+      changed = HoistFullyReduandantRecursive(graph, child) || changed;
+    }
+    return changed;
+  }
+  if (num_children <= 1) {
+    return false;
+  }
+  typedef DirectChainedHashMap<PointerKeyValueTrait<Instruction> > Map;
+  Map hoist_candidates;
+  for (intptr_t i = 0; i < num_children; ++i) {
+    BlockEntryInstr* child = block->dominated_blocks()[i];
+    changed = HoistFullyReduandantRecursive(graph, child) || changed;
+    if (i == 0) {
+      for (ForwardInstructionIterator it(child); !it.Done(); it.Advance()) {
+        Instruction* current = it.Current();
+        if (current->AllowsCSE()) {
+          hoist_candidates.Insert(current);
+        }
+      }
+    } else {
+      Map new_candidates;
+      for (ForwardInstructionIterator it(child); !it.Done(); it.Advance()) {
+        Instruction* current = it.Current();
+        if (current->AllowsCSE() && hoist_candidates.HasKey(current)) {
+          new_candidates.Insert(current);
+        }
+      }
+      hoist_candidates.Clear();
+      auto it = new_candidates.GetIterator();
+      while (true) {
+        auto p = it.Next();
+        if (p == nullptr) break;
+        hoist_candidates.Insert(*p);
+      }
+    }
+  }
+  auto it = hoist_candidates.GetIterator();
+  while (true) {
+    auto p = it.Next();
+    if (p == nullptr) break;
+    Instruction* current = *p;
+    bool should_hoist = true;
+    for (intptr_t i = 0; i < current->InputCount(); ++i) {
+      Definition* input_def = current->InputAt(i)->definition();
+      if (!input_def->GetBlock()->Dominates(block)) {
+        should_hoist = false;
+        break;
+      }
+    }
+    if (!should_hoist) continue;
+
+    if (FLAG_trace_optimization) {
+      THR_Print("Hoisting instruction %s:%" Pd " from B%" Pd " to B%" Pd "\n",
+                current->DebugName(), current->deopt_id(),
+                current->GetBlock()->block_id(), block->block_id());
+    }
+    // Move the instruction out of the loop.
+    current->RemoveEnvironment();
+    current->RemoveFromGraph();
+    Instruction* last = block->last_instruction();
+    // Using kind kEffect will not assign a fresh ssa temporary index.
+    graph->InsertBefore(last, current, last->env(), FlowGraph::kEffect);
+    current->CopyDeoptIdFrom(*last);
+    changed = true;
   }
   return changed;
 }
