@@ -371,7 +371,18 @@ void CodeAssembler::RecordSafePoint(const CallSiteInfo* call_site_info,
                                     const StackMaps::Record& record) {
   if (UNLIKELY(call_site_info->is_tailcall())) return;
   BitmapBuilder* builder = new BitmapBuilder();
-  builder->SetLength(slot_count_);
+  // Find the last hole.
+  int64_t parameter_bits = call_site_info->parameter_bits();
+  int valid_bits = call_site_info->valid_bits();
+  int last_hole = -1;
+
+  for (int i = valid_bits - 1; i >= 0; --i) {
+    if ((parameter_bits & (1ULL << i)) == 0) {
+      last_hole = i;
+    }
+  }
+  const size_t top_of_stack = slot_count_ - (valid_bits - last_hole - 1);
+  builder->SetLength(top_of_stack);
 
   for (auto& location : record.locations) {
     if (location.kind != StackMaps::Location::Indirect) continue;
@@ -390,18 +401,14 @@ void CodeAssembler::RecordSafePoint(const CallSiteInfo* call_site_info,
     builder->Set(index, true);
   }
   // set up parameters
-  size_t top_of_stack = slot_count_;
-  int64_t parameter_bits = call_site_info->parameter_bits();
-  int valid_bits = call_site_info->valid_bits();
-  int i;
 
-  for (i = 0; i < valid_bits; ++i) {
+  for (int i = 0; i < last_hole; ++i) {
     if ((parameter_bits & (1ULL << i)) == 0) continue;
     int index = top_of_stack - i - 1;
     builder->Set(index, true);
   }
-  compiler().compressed_stackmaps_builder()->AddEntry(assembler().CodeSize(),
-                                                      builder, slot_count_);
+  compiler().compressed_stackmaps_builder()->AddEntry(
+      assembler().CodeSize(), builder, slot_count_ - valid_bits);
 }
 
 void CodeAssembler::EmitExceptionHandler() {
